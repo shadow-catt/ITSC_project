@@ -1,0 +1,1059 @@
+---
+title: "Group_1"
+author: "David,Andi,Justin"
+date: '2022-05-22'
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning=FALSE)
+```
+
+Motivation: Red wine has received more and more attention in the field
+of health preservation. Therefore, how to taste fine wine and choose red
+wine has become a problem that more and more people are concerned about.
+What physical and chemical properties of red wine can meet people's
+needs for health preservation?
+
+Data: Our data set is from Kaggle. The entire data set has 12
+attributes. One of the variables "quality" represents the rating of the
+wine by wine experts (0-10). The table below shows details
+
+![](images/paste-5958AF25.png)
+
+From the background information, residual sugar, all acidity, and
+alcohol combine to create a wine's balance of flavor: acidity provides
+depth to the wine's flavor, while neutralizing the residual sugar to
+keep the wine fresh; alcohol adds to the palate more burning sensation.
+So, we can know that the quality of red wine mostly depends on "Fixed
+Acidity", "Volatile Acidity", "Citric Acid", "Residual Sugar", "PH",
+"Density" and "Alcohol".
+
+Objective: After knowing some background knowledge of red wine and
+simple data processing, we asked the following questions for this
+project: 1. What is the difference between a high-rated red wine and a
+low-rated red wine? 2. To what extent do the physical and chemical
+properties of red wine determine the quality of red wine?
+
+## Load Packages
+
+```{r include=FALSE}
+library(ggplot2)
+library(car)
+library(MASS)
+library(tidyverse)
+library(dplyr)
+library(psych)
+library(parsedate)
+library(corrplot)
+library(pheatmap)
+library(highcharter)
+library(GGally)
+```
+
+## Read CSV
+
+```{r include=FALSE}
+# setwd("D:/DeskTop/STAT/")
+data<-read.csv("winequality-red.csv")
+data<-data %>%select(-c("chlorides","free.sulfur.dioxide","total.sulfur.dioxide","sulphates")) # select intrersed 
+head(data)
+```
+
+## Brief Introduction of Data
+
+```{r echo=FALSE}
+str(data) # Get the data types
+describe(data) # get the basic numeric information 
+```
+
+## Visualization
+
+```{r echo=FALSE}
+# For Depenent Variable
+data_b <- data %>% count(quality)
+data_bar <- data_b %>%
+  mutate(index = as.factor(quality))
+
+hchart(data_b,"column",hcaes(x = "quality",y = "n")) %>%
+  hc_plotOptions(column = list(dataLabels = list(enabled = TRUE)))%>%
+  hc_xAxis(title = list(text = "Quality")) %>%
+  hc_yAxis(title = list(text = "Frequency")) %>%
+  hc_title(text = "Histogram for Quality")
+  # hc_add_series(data_b,"spline",hcaes(x ="quality",y = "n"))
+
+data_pi <- data_b
+data_pi["rate"] <- data_pi[["n"]]/sum(data_pi[["n"]])
+hchart(data_pi,"pie",hcaes(x = "quality",y = "n"))%>%
+  hc_plotOptions(pie = list(dataLabels = list(enabled = TRUE,
+                                              format = '{point.quality}: {point.rate:.2f}%')))%>%
+  hc_title(text = "Pie chartD for Quality")
+```
+
+In subsequent research, we determined that a score higher than 7 was a
+good wine, and a score lower than 7 was a bad wine.
+
+```{r echo=FALSE}
+scatterplotMatrix(data%>%select(-"quality"),diagonal=list(method="density", bw="nrd0", adjust=1, kernel="gaussian", na.rm=TRUE)) # Get the relation between independent variable
+```
+
+## Define Estimate Function
+
+```{r }
+# Jack Knife
+jackknife<-function(col){
+    n<-length(col)
+    jackmean<-numeric(n)
+    jackvar<-numeric(n)
+    for (i in 1:n){
+        jackmean[i]<-mean(col[-i])
+        jackvar[i]<-var(col[-i])
+    }
+    return(c(mean(jackmean),mean(jackvar)))
+}
+
+# Bootstrap mean and var
+bootstrap<-function(seed_num,col,B){
+    set.seed(seed_num)
+    n<-length(col)
+    bootmean<-numeric(n)
+    bootvar<-numeric(n)
+    for (b in 1:B){
+        i<-sample(1:n,size = n,replace = TRUE)
+        bootmean[i]<-mean(col[i])
+        bootvar[i]<-var(col[i])
+    }
+    return(c(mean(bootmean[i]),mean(bootvar[i])))
+}
+
+# Bootstrap bias and error
+bootstrapE<-function(seed_num,col,B){
+    set.seed(seed_num)
+    n<-length(col)
+    bootmean<-numeric(n)
+    bootvar<-numeric(n)
+    for (b in 1:B){
+        i<-sample(1:n,size = n,replace = TRUE)
+        bootmean[i]<-mean(col[i])
+        bootvar[i]<-var(col[i])
+    }
+    bias_mean<-mean(bootmean[i])-mean(col)
+    bias_var<-mean(bootvar[i])-var(col)
+    se_mean<-sd(bootmean)
+    se_var<-sd(bootvar)
+    return(c(bias_mean,se_mean,bias_var,se_var))
+}
+
+## with no optimization
+MLEOP<- function(theta,x) {
+    mu<-theta[1]
+    var<-theta[2]
+    return (-(-(n/2)*log(2*pi)-(n/2)*log(var)-(1/(2*var))*sum((x-mu)^2)))
+}
+
+# EM algorithm for mixture estimations
+gmm <- function(x, mean, sd = NULL)
+{
+    # initialize
+    num <- length(mean)
+    
+    epsilon <- 1e-4
+    probs <- rep(1/num, num)
+    mu_s <- mean
+    sigma_s <- sd ^ 2
+    n <- length(x)
+    while(TRUE)
+    {
+        # E-step calculate estimated prob
+        ps <- matrix(0, ncol = num, nrow = n)
+        for(j in seq(num))
+        {
+            ps[, j] <- probs[j] * dnorm(x, mean = mu_s[j], sd = sqrt(sigma_s[j]))
+        }
+        ps <- ps / rowSums(ps)
+        
+        sigma_s_p <- sigma_s
+        # M-step update the mean, sigma and prob
+        for(j in seq(num))
+        {
+            sigma_s[j] <- sum( ps[, j] * (x - mu_s[j])^2) / sum(ps[, j])
+            mu_s[j] <- sum(x * ps[, j]) / sum(ps[, j])
+            probs[j] <- mean(ps[, j])
+            
+        }
+        
+        if (max(abs(sigma_s_p - sigma_s)) < epsilon)
+        {
+            break
+        }
+    
+    }
+    
+    return (list(mu = mu_s, var = sigma_s, prob = probs))
+    
+}
+```
+
+## Show the Histogram and Kernel Density Estimates
+
+```{r echo=FALSE}
+fixed.acidity<-data$fixed.acidity
+n<-length(fixed.acidity)
+h1<-0.9 * min(c(IQR(fixed.acidity)/1.34,sd(fixed.acidity)))*n^(-1/5)
+
+citric.acid<-data$citric.acid
+n<-length(citric.acid)
+sigmahat<-min(sd(citric.acid),IQR(citric.acid)/1.34)
+h2<-0.9 * min(c(IQR(citric.acid)/1.34,sigmahat))*n^(-1/5)
+
+density<-data$density
+n<-length(density)
+h3<-0.9 * min(c(IQR(density)/1.34,sd(density)))*n^(-1/5)
+
+residual.sugar<-data$residual.sugar
+n<-length(residual.sugar)
+h4<-0.9 * min(c(IQR(residual.sugar)/1.34,sd(residual.sugar)))*n^(-1/5)
+
+alcohol<-data$alcohol
+n<-length(alcohol)
+h5<-0.9 * min(c(IQR(alcohol)/1.34,sd(alcohol)))*n^(-1/5)
+
+volatile.acidity<-data$volatile.acidity
+n<-length(volatile.acidity)
+h6<-0.9 * min(c(IQR(volatile.acidity)/1.34,sd(volatile.acidity)))*n^(-1/5)
+
+pH<-data$pH
+n<-length(pH)
+h7<-0.9 * min(c(IQR(pH)/1.34,sd(pH)))*n^(-1/5)
+
+par(mfrow=c(2,2))
+hist(fixed.acidity)
+plot(density(fixed.acidity,bw=h1))
+hist(citric.acid)
+plot(density(citric.acid,bw=h2))
+hist(volatile.acidity)
+plot(density(volatile.acidity,bw=h6))
+
+
+```
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+
+hist(density)
+plot(density(density,bw=h3))
+hist(residual.sugar)
+plot(density(residual.sugar,bw=h4))
+
+```
+
+```{r echo=FALSE}
+par(mfrow=c(2,2))
+
+hist(alcohol)
+plot(density(alcohol,bw=h5))
+hist(pH)
+plot(density(pH,bw=h7))
+```
+
+For the Kernel density estimates, all variable we use the Gaussian
+Kernel, K(t)=1/√2π exp⁡(-1/2 t\^2). In addition, for unimodal
+distribution we set a better estimate for Gaussian
+$h=0.9 min⁡(S,\frac{IQR}{1.34})n^{-\frac{1}{5}}$. But for which is not
+unimodal, we set $\hat \sigma=min⁡(S,\frac{IQR}{1.34}))$.
+
+## Explain Keneral Density Estimates
+
+![](images/Kernel%20Density%20Estimation.png)Kernel density estimation
+is used in probability theory to estimate the unknown density function,
+which belongs to one of the non-parametric test methods. Since the
+kernel density estimation method does not use prior knowledge about the
+data distribution, it does not attach any assumptions to the data
+distribution. The method of studying the characteristics of data
+distribution from the data sample itself. The ideas of Kernel Density
+Estimation are generated from histogram. If we draw a histogram, the
+purpose is to draw a "probability density function", and a histogram
+essentially thinks that frequency equals probability. But this
+assumption is not inevitable. The kernel density function is a means of
+"smoothing". For example, let (x1,x2,...,xn) be n sample points that are
+independent and identically distributed, and its probability density
+function is f, so our estimate:
+$\hat f_h(x)=\frac{1}{nh}=\sum_{i=1}^nK(\frac{x-x_i}{h})$. Here h is the
+bandwidth. For Gaussian Kernel, if the distribution is unimodal, we need
+to set $h=0.9 min⁡(S,\frac{IQR}{1.34})n^{-\frac{1}{5}}$. In addition, if
+the distribution is not unimodal, we need set
+$\hat \sigma=min⁡(S,\frac{IQR}{1.34})$.
+
+## Explain MLE
+
+The formula for Gaussian Distribution
+$$f(x)=\frac{1}{\sqrt{2\pi \sigma^2}}e^{-\frac{(x-\mu)^2}{2\sigma^2}}$$
+$$L(f(x))=(\frac{1}{\sqrt{2\pi \sigma^2}})^n e^{\sum_{i=1}^n -\frac{(x_i-\mu)^2}{2\sigma^2}}$$
+$$ln(L(f(x)))=-\frac{n}{2}(ln{(2\pi)}+ln(\sigma^2)) - {\sum_{i=1}^n \frac{(x_i -\mu)^2}{2\sigma^2}}$$
+$$\frac{\partial ln(L)}{\partial \mu}=\frac{1}{\sigma^2}\sum_{i=1}^n (x_i -\mu)=0$$
+$$\frac{\partial ln(L)}{\partial \sigma^2}=-\frac{n}{2\sigma^2}+\frac{1}{2\sigma^4}\sum_{i=1}^n (x_i -\mu)^2=0$$
+
+$$\mu=\frac{1}{n}\sum_{i=1}^n x_i = \overline x$$
+$$\sigma^2=\frac{1}{n}\sum_{i=1}^n (x_i-\mu)^2$$ The Maximum Likelihood
+Estimation method to estimate the value of the most likely parameter by
+finding the maximum likelihood. For calculation, you need product the
+all observed sample. After defining the Likelihood Function, we take the
+logarithm of likelihood function. Because the monotonicity of the
+logarithm does not change the monotonicity of the likelihood formula,
+and both take the maximum value at the same point. Finally, derive the
+parameters and set the equation to zero to get the estimated value. \##
+Shows the Estimation
+
+```{r echo=FALSE, warning=FALSE}
+print("Fixed Acidity")
+paste("Bootstrap Mean:",bootstrap(0,fixed.acidity,2000)[1])
+paste("Bootstrap var:",bootstrap(0,fixed.acidity,2000)[2])
+paste("Jacknife Mean:",jackknife(fixed.acidity)[1])
+paste("Jacknife Var:",jackknife(fixed.acidity)[2])
+paste("Sample Mean:",mean(fixed.acidity))
+paste("Sample Var:",var(fixed.acidity))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=fixed.acidity)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=fixed.acidity)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Cirtic Acdity")
+paste("Bootstrap Mean:",bootstrap(0,citric.acid,2000)[1])
+paste("Bootstrap var:",bootstrap(0,citric.acid,2000)[2])
+paste("Jacknife Mean:",jackknife(citric.acid)[1])
+paste("Jacknife Var:",jackknife(citric.acid)[2])
+paste("Sample Mean:",mean(citric.acid))
+paste("Sample Var:",var(citric.acid))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=citric.acid)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=citric.acid)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Cirtic Acdity")
+paste("Bootstrap Mean:",bootstrap(0,citric.acid,2000)[1])
+paste("Bootstrap var:",bootstrap(0,citric.acid,2000)[2])
+paste("Jacknife Mean:",jackknife(citric.acid)[1])
+paste("Jacknife Var:",jackknife(citric.acid)[2])
+paste("Sample Mean:",mean(citric.acid))
+paste("Sample Var:",var(citric.acid))
+print("EM outputs")
+gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))
+```
+
+```{r echo=FALSE, warning=FALSE}
+mu1<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$mu[1]
+mu2<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$mu[2]
+mu3<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$mu[3]
+var1<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$var[1]
+var2<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$var[2]
+var3<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$var[3]
+p1<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$prob[1]
+p2<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$prob[2]
+p3<-gmm(citric.acid,mean=c(0,0.3,0.5),sd=c(0.03,0.01,0.02))$prob[3]
+mu<-mu1*p1+mu2*p2+mu3*p3
+
+vark<-p1*(mu1^2+var1)+p2*(mu2^2+var2)+p3*(mu3^2+var3)-mu^2
+paste("EM Mean",mu)
+paste("EM Var",vark)
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Density")
+paste("Bootstrap Mean:",bootstrap(0,density,2000)[1])
+paste("Bootstrap var:",bootstrap(0,density,2000)[2])
+paste("Jacknife Mean:",jackknife(density)[1])
+paste("Jacknife Var:",jackknife(density)[2])
+paste("Sample Mean:",mean(density))
+paste("Sample Var:",var(density))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=density)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=density)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Residual Sugar")
+paste("Bootstrap Mean:",bootstrap(0,residual.sugar,2000)[1])
+paste("Bootstrap var:",bootstrap(0,residual.sugar,2000)[2])
+paste("Jacknife Mean:",jackknife(residual.sugar)[1])
+paste("Jacknife Var:",jackknife(residual.sugar)[2])
+paste("Sample Mean:",mean(residual.sugar))
+paste("Sample Var:",var(residual.sugar))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=residual.sugar)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=residual.sugar)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Alcohol")
+paste("Bootstrap Mean:",bootstrap(0,alcohol,2000)[1])
+paste("Bootstrap var:",bootstrap(0,alcohol,2000)[2])
+paste("Jacknife Mean:",jackknife(alcohol)[1])
+paste("Jacknife Var:",jackknife(alcohol)[2])
+paste("Sample Mean:",mean(alcohol))
+paste("Sample Var:",var(alcohol))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=alcohol)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=alcohol)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("Volatile Acidity")
+paste("Bootstrap Mean:",bootstrap(0,volatile.acidity,2000)[1])
+paste("Bootstrap var:",bootstrap(0,volatile.acidity,2000)[2])
+paste("Jacknife Mean:",jackknife(volatile.acidity)[1])
+paste("Jacknife Var:",jackknife(volatile.acidity)[2])
+paste("Sample Mean:",mean(volatile.acidity))
+paste("Sample Var:",var(volatile.acidity))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=volatile.acidity)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=volatile.acidity)$par[2])
+```
+
+```{r echo=FALSE, warning=FALSE}
+print("pH")
+paste("Bootstrap Mean:",bootstrap(0,pH,2000)[1])
+paste("Bootstrap var:",bootstrap(0,pH,2000)[2])
+paste("Jacknife Mean:",jackknife(pH)[1])
+paste("Jacknife Var:",jackknife(pH)[2])
+paste("Sample Mean:",mean(pH))
+paste("Sample Var:",var(pH))
+paste("MLE Mean:",optim(c(1,1), MLEOP,x=pH)$par[1])
+paste("MLE Var:",optim(c(1,1), MLEOP,x=pH)$par[2])
+```
+
+## Modeling
+
+## Step function for a glance
+
+After we have basic knowledge on these data, we will try to build model
+base on these data. We firstly conduct the easiest way for linear
+regression, which is using step function. We totally apply three method
+for the step function for linear regression: forward step, backward step
+and both step. The difference between these methods is how the variables
+are added to the regression model. From these result we can notice that
+for the quality as y, other variables as x. The more important variables
+are fixed.acidity, volatile.acidity, citric.acid, pH and the alcohol,
+which will also be the focus of our analysis later.
+
+```{r include=FALSE}
+data <- select(data,c(fixed.acidity,volatile.acidity,citric.acid,pH,alcohol,quality))
+data
+```
+
+## Basic analysis for a glance
+
+After we select the variables we interested. We draw the scatter matrix
+for better viewing the correlation coefficient values and scatter plots
+between two variables to explore more information between these data.
+
+```{r echo=FALSE, message=FALSE}
+library(metan)
+corr_plot(data)
+```
+
+Besides, we use the powerTransform function to detect whether the
+variable is suitable for logarithms.
+
+```{r echo=FALSE}
+powerTransform(data['fixed.acidity']+0.00001)
+powerTransform(data['volatile.acidity']+0.00001)
+powerTransform(data['citric.acid']+0.00001)
+powerTransform(data['pH']+0.00001)
+powerTransform(data['alcohol']+0.00001)
+```
+
+The variable which is close to zero, the log-transformtion is suggested.
+And the variable which is about 0.5, then the corresponding variable
+would be replaced by its square root. These result can be very useful
+when we select the variable for the model by hand.
+
+## Select the model by jackknife
+
+Then we will select the model and using the jackknife to find the
+suitable model. The workflow is to mask one of the data one by one in
+order. We just select one of the variables each search. For each mask,
+we use the remaining data for building model. And then use the data
+being masked to make prediction, and get the error of it.The best
+variable with the best model has the lowest error square mean.
+
+We totally using two ways to find the variable with corresponding
+coefficient.
+
+### Grid search
+
+We firstly apply most simple but time consuming method to obtain the
+best model, which is searching one by one with the following form.
+
+1.  Linear: $Y = \beta_0 + \beta_1 X +\varepsilon$
+
+2.  Quadratic: $Y = \beta_0 + \beta_1 X + \beta_1 X^2 +\varepsilon$
+
+3.  Square root: $Y = \beta_0 + \beta_1 \sqrt{X}+\varepsilon$
+
+And the variable which have the smallest error when using the jackknife
+method to build the corresponding model and make the prediction for the
+data. After we get the best one, we continuing adding new variable to
+conduct another operation to find the next variables and the model. The
+one of step ranking is shown in here, 1 means the linear form, 2 means
+the quadratic form and 3 means the square root form.
+
+```{r echo=FALSE}
+# find the first one
+n <- length(data$quality)
+e1 <- e2 <- e3 <- numeric(n)
+
+# the y is default as the quality
+y <- data$quality
+
+col_data <-colnames(data) 
+x_name <- col_data[0:(length(col_data)-1)]
+
+E2_list <- c()
+E_type_list <- c()
+
+for(col_ind in 1:length(x_name)){
+  x <- data[[x_name[col_ind]]]
+  for (k in 1:length(y)) {
+    # jackknife
+    y_minus <- y[-k]
+    x_minus <- x[-k]
+    
+    J1 <- lm(y_minus ~ x_minus)
+    J2 <- lm(y_minus ~ x_minus + I(x_minus^2))
+    J3 <- lm(y_minus ~ sqrt(x_minus))
+    
+    yhat1 <- J1$coef[1] + J1$coef[2] * x[k]
+    e1[k] <- y[k] - yhat1
+    
+    yhat2 <- J2$coef[1] + J2$coef[2] * x[k] + J2$coef[3] * ((x[k])^2)
+    e2[k] <- y[k] - yhat2
+    
+    yhat3 <- J3$coef[1] + J3$coef[2] * sqrt(x[k])
+    e3[k] <- y[k] - yhat3
+    
+  }
+  if (mean(e1^2)<mean(e2^2) & mean(e1^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e1^2))
+    E_type_list <- append(E_type_list,1)
+  }else if(mean(e2^2)<mean(e1^2) & mean(e2^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e2^2))
+    E_type_list <- append(E_type_list,2)
+  }else{
+    E2_list <- append(E2_list,mean(e3^2))
+    E_type_list <- append(E_type_list,3)
+  }
+}
+
+# ranking the mean to get the best one
+df <- data.frame(X_name = x_name,
+                 E2_mean = E2_list,
+                 E_type_list = E_type_list)
+df[order(df$E2_mean),]
+```
+
+```{r eval=FALSE, include=FALSE}
+# find the second one
+del_name = "alcohol"
+keep = which(x_name==del_name)
+x_name_del1 = x_name[-keep]
+# x_name_del1
+
+n <- length(data$quality)
+e1 <- e2 <- e3 <- numeric(n)
+
+E2_list <- c()
+E_type_list <- c()
+
+for(col_ind in 1:length(x_name_del1)){
+  x <- data[[x_name_del1[col_ind]]]
+  for (k in 1:length(y)) {
+    # jackknife
+    y_minus <- y[-k]
+    x_minus <- x[-k]
+    x1_minus <- data$alcohol[-k]
+    
+    J1 <- lm(y_minus ~ sqrt(x1_minus) + x_minus)
+    J2 <- lm(y_minus ~ sqrt(x1_minus) + x_minus + I(x_minus^2))
+    J3 <- lm(y_minus ~ sqrt(x1_minus) + sqrt(x_minus))
+    
+    yhat1 <- J1$coef[1] + J1$coef[2] *sqrt(data$alcohol[k]) + J1$coef[3] * x[k]
+    e1[k] <- y[k] - yhat1
+    
+    yhat2 <- J2$coef[1] + J2$coef[2] *sqrt(data$alcohol[k]) + J2$coef[3] * x[k] + J2$coef[4] * ((x[k])^2)
+    e2[k] <- y[k] - yhat2
+    
+    yhat3 <- J3$coef[1] + J3$coef[2] *sqrt(data$alcohol[k]) + J3$coef[3] * sqrt(x[k])
+    e3[k] <- y[k] - yhat3
+    
+  }
+  if (mean(e1^2)<mean(e2^2) & mean(e1^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e1^2))
+    E_type_list <- append(E_type_list,1)
+  }else if(mean(e2^2)<mean(e1^2) & mean(e2^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e2^2))
+    E_type_list <- append(E_type_list,2)
+  }else{
+    E2_list <- append(E2_list,mean(e3^2))
+    E_type_list <- append(E_type_list,3)
+  }
+  # print(c(mean(e1^2),mean(e2^2),mean(e3^2)))
+}
+
+df <- data.frame(X_name = x_name_del1,
+                 E2_mean = E2_list,
+                 E_type_list = E_type_list)
+df[order(df$E2_mean),]
+```
+
+```{r eval=FALSE, include=FALSE}
+# find the third one
+del_name = "volatile.acidity"
+keep = which(x_name_del1==del_name)
+x_name_del2 = x_name_del1[-keep]
+# x_name_del2
+y <- data$quality
+
+E2_list <- c()
+E_type_list <- c()
+
+n <- length(data$quality)
+e1 <- e2 <- e3 <- numeric(n)
+
+for(col_ind in 1:length(x_name_del2)){
+  x <- data[[x_name_del2[col_ind]]]
+  for (k in 1:length(y)) {
+    # jackknife
+    y_minus <- y[-k]
+    x_minus <- x[-k]
+    x1_minus <- data$alcohol[-k]
+    x2_minus <- data$volatile.acidity[-k]
+    
+    J1 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x_minus)
+    J2 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x_minus + I(x_minus^2))
+    J3 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + sqrt(x_minus))
+    
+    yhat1 <- J1$coef[1] + J1$coef[2] *sqrt(data$alcohol[k]) + J1$coef[3] * data$volatile.acidity[k] + J1$coef[4] * x[k]
+    e1[k] <- y[k] - yhat1
+    
+    yhat2 <- J2$coef[1] + J2$coef[2] *sqrt(data$alcohol[k]) + J2$coef[3] * data$volatile.acidity[k] + J2$coef[4] * x[k] + J2$coef[5] * ((x[k])^2)
+    e2[k] <- y[k] - yhat2
+    
+    yhat3 <- J3$coef[1] + J3$coef[2] *sqrt(data$alcohol[k]) + J3$coef[3] * data$volatile.acidity[k] + J3$coef[4] * sqrt(x[k])
+    e3[k] <- y[k] - yhat3
+    
+  }
+  if (mean(e1^2)<mean(e2^2) & mean(e1^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e1^2))
+    E_type_list <- append(E_type_list,1)
+  }else if(mean(e2^2)<mean(e1^2) & mean(e2^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e2^2))
+    E_type_list <- append(E_type_list,2)
+  }else{
+    E2_list <- append(E2_list,mean(e3^2))
+    E_type_list <- append(E_type_list,3)
+  }
+  # print(c(mean(e1^2),mean(e2^2),mean(e3^2)))
+}
+df <- data.frame(X_name = x_name_del2,
+                 E2_mean = E2_list,
+                 E_type_list = E_type_list)
+df[order(df$E2_mean),]
+```
+
+```{r eval=FALSE, include=FALSE}
+# find the fourth one
+del_name = "fixed.acidity"
+keep = which(x_name_del2==del_name)
+x_name_del3 = x_name_del2[-keep]
+# x_name_del3
+# x_name_del2
+y <- data$quality
+
+E2_list <- c()
+E_type_list <- c()
+
+n <- length(data$quality)
+e1 <- e2 <- e3 <- numeric(n)
+
+for(col_ind in 1:length(x_name_del3)){
+  x <- data[[x_name_del3[col_ind]]]
+  for (k in 1:length(y)) {
+    # jackknife
+    y_minus <- y[-k]
+    x_minus <- x[-k]
+    x1_minus <- data$alcohol[-k]
+    x2_minus <- data$volatile.acidity[-k]
+    x3_minus <- data$fixed.acidity[-k]
+    
+    J1 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x_minus)
+    J2 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x_minus + I(x_minus^2))
+    J3 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + sqrt(x_minus))
+    
+    yhat1 <- J1$coef[1] + J1$coef[2] *sqrt(data$alcohol[k]) + J1$coef[3] * data$volatile.acidity[k] + J1$coef[4] * data$fixed.acidity[k] + J1$coef[5] * ((data$fixed.acidity[k])^2) + J1$coef[6] * x[k]
+    e1[k] <- y[k] - yhat1
+    
+    yhat2 <- J2$coef[1] + J2$coef[2] *sqrt(data$alcohol[k]) + J2$coef[3] * data$volatile.acidity[k] + J2$coef[4] * data$fixed.acidity[k] + J2$coef[5] * ((data$fixed.acidity[k])^2) + J2$coef[6] * x[k] + J2$coef[7] * ((x[k])^2)
+    e2[k] <- y[k] - yhat2
+    
+    yhat3 <- J3$coef[1] + J3$coef[2] *sqrt(data$alcohol[k]) + J3$coef[3] * data$volatile.acidity[k] + J3$coef[4] * data$fixed.acidity[k] + J3$coef[5] * ((data$fixed.acidity[k])^2) + J3$coef[6] * sqrt(x[k])
+    e3[k] <- y[k] - yhat3
+  }
+  if(mean(e1^2)<mean(e2^2) & mean(e1^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e1^2))
+    E_type_list <- append(E_type_list,1)
+  }else if(mean(e2^2)<mean(e1^2) & mean(e2^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e2^2))
+    E_type_list <- append(E_type_list,2)
+  }else{
+    E2_list <- append(E2_list,mean(e3^2))
+    E_type_list <- append(E_type_list,3)
+  }
+  print(c(mean(e1^2),mean(e2^2),mean(e3^2)))
+}
+df <- data.frame(X_name = x_name_del3,
+                 E2_mean = E2_list,
+                 E_type_list = E_type_list)
+df[order(df$E2_mean),]
+```
+
+```{r eval=FALSE, include=FALSE}
+# find the fifth one
+del_name = "citric.acid"
+keep = which(x_name_del3==del_name)
+x_name_del4 = x_name_del3[-keep]
+# x_name_del4
+y <- data$quality
+
+E2_list <- c()
+E_type_list <- c()
+
+n <- length(data$quality)
+e1 <- e2 <- e3 <- numeric(n)
+
+for(col_ind in 1:length(x_name_del4)){
+  x <- data[[x_name_del4[col_ind]]]
+  for (k in 1:length(y)) {
+    # jackknife
+    y_minus <- y[-k]
+    x_minus <- x[-k]
+    x1_minus <- data$alcohol[-k]
+    x2_minus <- data$volatile.acidity[-k]
+    x3_minus <- data$fixed.acidity[-k]
+    x4_minus <- data$citric.acid[-k]
+    
+    J1 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x4_minus + x_minus)
+    J2 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x4_minus + x_minus + I(x_minus^2))
+    J3 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x4_minus + sqrt(x_minus))
+    
+    yhat1 <- J1$coef[1] + J1$coef[2] *sqrt(data$alcohol[k]) + J1$coef[3] * data$volatile.acidity[k] + J1$coef[4] * data$fixed.acidity[k] + J1$coef[5] * ((data$fixed.acidity[k])^2) + J1$coef[6] * data$citric.acid[k] + J1$coef[7] * x[k]
+    e1[k] <- y[k] - yhat1
+    
+    yhat2 <- J2$coef[1] + J2$coef[2] *sqrt(data$alcohol[k]) + J2$coef[3] * data$volatile.acidity[k] + J2$coef[4] * data$fixed.acidity[k] + J2$coef[5] * ((data$fixed.acidity[k])^2) + J1$coef[6] * data$citric.acid[k] + J2$coef[7] * x[k] + J2$coef[8] * ((x[k])^2)
+    e2[k] <- y[k] - yhat2
+    
+    yhat3 <- J3$coef[1] + J3$coef[2] *sqrt(data$alcohol[k]) + J3$coef[3] * data$volatile.acidity[k] + J3$coef[4] * data$fixed.acidity[k] + J3$coef[5] * ((data$fixed.acidity[k])^2) + J1$coef[6] * data$citric.acid[k] + J3$coef[7] * sqrt(x[k])
+    e3[k] <- y[k] - yhat3
+  }
+  if(mean(e1^2)<mean(e2^2) & mean(e1^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e1^2))
+    E_type_list <- append(E_type_list,1)
+  }else if(mean(e2^2)<mean(e1^2) & mean(e2^2)<mean(e3^2)){
+    E2_list <- append(E2_list,mean(e2^2))
+    E_type_list <- append(E_type_list,2)
+  }else{
+    E2_list <- append(E2_list,mean(e3^2))
+    E_type_list <- append(E_type_list,3)
+  }
+  print(c(mean(e1^2),mean(e2^2),mean(e3^2)))
+}
+df <- data.frame(X_name = x_name_del4,
+                 E2_mean = E2_list,
+                 E_type_list = E_type_list)
+df[order(df$E2_mean),]
+```
+
+Thus, we can finally get the function which is looks like as follows:
+
+$$
+Y = \sqrt{alcohol} + volatile.acidity + fixed.acidity + fixed.acidity^2 + citric.acid + pH
+$$
+
+### Select by hand
+
+After we went through the previously obtained information, including the
+results of powerTransform, correlation coefficient plot, and scatter
+plot between two two variables, we manually selected the model by
+experience and finally obtained the following model.
+
+$$
+Y = \sqrt{alcohol} + volatile.acidity + \sqrt{fixed.acidity} + \sqrt{citric.acid} + log(pH)
+$$
+
+### Final comparison and the view of performance
+
+We make the final comparison for the model we select by hand and the
+model we select by grid search
+
+```{r echo=FALSE}
+# finial comparison
+y <- data$quality
+
+E2_list <- c()
+E_type_list <- c()
+
+n <- length(data$quality)
+e1 <- e2 <- numeric(n)
+
+
+for (k in 1:length(y)) {
+  # jackknife
+  y_minus <- y[-k]
+  x1_minus <- data$alcohol[-k]
+  x2_minus <- data$volatile.acidity[-k]
+  x3_minus <- data$fixed.acidity[-k]
+  x4_minus <- data$citric.acid[-k]
+  x5_minus <- data$pH[-k]
+    
+  J1 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + x3_minus + I(x3_minus^2) + x4_minus + x5_minus)
+  J2 <- lm(y_minus ~ sqrt(x1_minus) + x2_minus + sqrt(x3_minus) + sqrt(x4_minus) +log(x5_minus))
+    
+  yhat1 <- J1$coef[1] + J1$coef[2] *sqrt(data$alcohol[k]) + J1$coef[3] * data$volatile.acidity[k] + J1$coef[4] * data$fixed.acidity[k] + J1$coef[5] * ((data$fixed.acidity[k])^2) + J1$coef[6] * data$citric.acid[k] + J1$coef[7] * data$pH[k]
+  e1[k] <- y[k] - yhat1
+  
+  yhat2 <- J2$coef[1] + J2$coef[2] *sqrt(data$alcohol[k]) + J2$coef[3] * data$volatile.acidity[k] + J2$coef[4] * sqrt(data$fixed.acidity[k]) + J2$coef[5] * sqrt(data$citric.acid[k]) + J2$coef[6] * log(data$pH[k])
+  e2[k] <- y[k] - yhat2
+  }
+
+print("Model from gird search")
+print(mean(e1^2))
+print("Model select by hand")
+print(mean(e2^2))
+```
+
+Thus, from the result we can notice that the model gain from the grid
+search is better than the model we selected by hand. Now we will make
+analysis for this model.
+
+```{r echo=FALSE}
+# Final model for grid search
+L <- lm(data$quality ~ sqrt(data$alcohol) + data$volatile.acidity + data$fixed.acidity + I(data$fixed.acidity^2) + data$citric.acid + data$pH)
+par(mfrow = c(2, 2)) #layout for graphs
+plot(L)
+```
+
+We then draw the four graph to have a better view of the performance of
+the model. We can see that the QQ plot is mostly normal distribution,
+and the line is almost fit all the point. And the residuals are
+acceptable since the quality is a qualitative variables which use the
+number to represent it
+
+## Get the bias and standard error of the estimator
+
+Then we conduct the bootstrap method to get the bias and standard error
+of the estimator. We use the sample as the original value of the
+estimator. And we use the bootstrap to generate a lot of samples to
+build model by lm function and get new estimator. The result is listing
+here.
+
+```{r include=FALSE}
+# initial length
+n<-length(data$quality)
+bootmean<-numeric(n)
+bootvar<-numeric(n)
+
+# original data
+y <- data$quality
+
+L <- lm(data$quality ~ sqrt(data$alcohol) + data$volatile.acidity + data$fixed.acidity + I(data$fixed.acidity^2) + data$citric.acid + data$pH)
+
+coef_org_list <-  data.frame(L$coef)
+
+B = 2000
+
+# start boot
+for (b in 1:B){
+  # select the data by sample  
+  i<-sample(1:n,size = n,replace = TRUE)
+  used <- data[i,]
+  
+  L <- lm(used$quality ~ sqrt(used$alcohol) + used$volatile.acidity + used$fixed.acidity + I(used$fixed.acidity^2) + used$citric.acid + data$pH)
+  
+  coef_org_list <- cbind(coef_org_list,data.frame(L$coef))
+}
+
+all_boot_coff <- coef_org_list[,2:dim(coef_org_list)[2]]
+org_coff <- coef_org_list[,1]
+bias_coff <- all_boot_coff - org_coff
+
+bias_coff_mean <- rowMeans(bias_coff, na.rm=TRUE)
+bias_coff_var <- rowMeans((bias_coff - bias_coff_mean)^2, na.rm=TRUE)*dim(bias_coff)[2]/(dim(bias_coff)[2]-1)
+```
+
+```{r echo=FALSE}
+print("Bias coefficient mean:")
+print(bias_coff_mean)
+print("Bias coefficient standard deviation:")
+print(sqrt(bias_coff_var))
+```
+
+From the results, we can see that the values of some Bias coefficient
+mean are satisfied, but some of them are still relatively high, so there
+is still room for improvement of this model. We can optimize this model
+by trying more combinations, and this is also the direction we can
+further improve in the future.
+
+## Simulation
+
+```{r }
+mydata<-read.csv("winequality-red.csv")
+```
+
+Because the "density" features is a significant evaluations for the
+quality of the red wine. So we used it to do the simulation. We drew the
+histogram of the "density" feature.
+
+```{R echo=TRUE}
+hist(mydata$density,freq=FALSE,breaks=50,col="#993333",prob=TRUE)
+lines(density(mydata$density),col="#996633",lwd=8)
+```
+
+we can see that,①The peak is in the middle. ②Both sides gradually
+decreasing ③The two sides are nearly symmetrical④The ends do not
+intersect with the x-axis，so it follow the normal distribution. for the
+ML_function, we can get the mean and variance:
+
+Firstly, we used the optimized method to get the mean and variance: For
+the big sample:
+
+```{r include=TRUE,echo=TRUE,results="hide",warning=FALSE}
+#mean and standard variance
+LL <- function(theta,x) {
+    mu<-theta[1]
+    var<-theta[2]
+    return (-(-(n/2)*log(2*pi)-(n/2)*log(var)-(1/(2*var))*sum((x-mu)^2)))
+}
+optim(c(1,1), LL,x=mydata$density)
+```
+
+The value methods is used to calculate the the population mean and
+variance in different method(MLE/Sample):
+
+```{r include=TRUE,echo=TRUE,results="hide"}
+values<-function(sample){
+m<-mean(sample)
+s_l<-sum(((sample)-mean(sample))^2)/(length(sample))#ml
+s_s<-sum(((sample)-mean(sample))^2)/(length(sample)-1)
+list(mu = m, s_mle = s_l, s_sample = s_s)
+}
+values(mydata$density)
+```
+
+We write a method to help us calculate different evaluations.The method
+is used to calculate the Monte Carlo the MEAN/STD/MSE:
+
+```{r}
+evaluation<-function(sample,mean,vars){
+  #"sample" is the size of the simulation sample
+  #"mean" is the the mean of different methods mean value
+  #"vars" is the the variance of different methods variance value
+df <- matrix(NA,sample,1)
+df <- as.data.frame(df)
+n=400
+for (i in 1:n) {
+  df[,i] <- rnorm(sample,mean,sqrt(vars))
+}
+df2 <- data.frame(mean=NA,ss2=NA)
+df3 <- data.frame(mean=NA,ss2=NA)
+for (i in 1:n){
+  t1 <- mean(df[,i])
+  t2 <- sum(((df[,i])-mean(df[,i]))^2)/length(df[,i])#ml method
+  df2[i,] <- c(t1,t2)
+  t3 <- mean(df[,i])
+  t4 <- sum(((df[,i])-mean(df[,i]))^2)/(length(df[,i])-1)#sample method
+  df3[i,] <- c(t3,t4)
+} 
+#ml
+msef<-data.frame(meanv1=NA,sv1=NA)
+n=400#the repeat time
+for(u in 1:n){
+  mse1<-(df2[u,2]-(mean(df2$ss2)))^2
+  mv1<-(df2[u,1]-(mean(df2$mean)))^2
+  msef[u,]<-c(mv1,mse1)
+}
+res_s=mean(msef$sv1)+(mean(df2$ss2)-vars)^2
+res_m=mean(msef$meanv1)+(mean(df2$mean)-mean)^2
+#sample
+msef1<-data.frame(meanv2=NA,sv2=NA)
+n=400
+for(u in 1:n){
+  mse1<-(df3[u,2]-(sum(df3$ss2)/400))^2
+  mv1<-(df3[u,1]-(sum(df3$mean)/400))^2
+  msef1[u,]<-c(mv1,mse1)
+}
+c<-sum(msef1$sv2)/400
+res_s1=c+(sum(df3$ss2)/400-vars)^2
+d<-sum(msef1$meanv2)/400
+res_m1=d+(sum(df3$mean)/400-mean)^2
+list(mu_mle = mean(df2$mea), std_mle =mean(df2$ss2) ,m_sample= mean(df3$mean),std_sample=mean(df3$ss2),mse_mle_mean = res_m, mse_mle_var =res_s,mse_sample_mean = res_m1, mse_sample_var =res_s1)  
+}
+```
+
+We can use the above function to get the result for the population of
+"density" of the red wine.
+
+![](1653053132(1).jpg)Meanwhile, we divided the data set into two part.
+If the quality is bigger or equal to 7, they can be considered to be
+good wines. If the quality is smaller than 7, they can be considered to
+be a bad wines. Also we used this two sample sizes to do the MLE and
+Sample methods with the Monte Carlo.
+
+```{r,echo=TRUE}
+good<-mydata$density[mydata$quality>=7]
+bad<-mydata$density[mydata$quality<7]
+#the mixture normal distribution
+hist(good,freq=FALSE,breaks=50,col="#993333",prob=TRUE)
+lines(density(good),col="#996633",lwd=8)
+#the normal distribution
+hist(bad,freq=FALSE,breaks=50,col="#993333",prob=TRUE)
+lines(density(bad),col="#996633",lwd=8)
+
+```
+
+```{r eval=TRUE,results="hide"}
+#for the good wine:
+evaluation(50,0.9967467,3.559802e-06)
+evaluation(1000,0.9967467,3.559802e-06)
+evaluation(50,0.9967467,3.562029e-06)
+evaluation(1000,0.9967467,3.562029e-06)
+#for the bad wine:
+evaluation(50,0.9968592,3.268215e-06)
+evaluation(1000,0.9968592,3.268215e-06)
+evaluation(50,0.9968592,3.270581e-06)
+evaluation(1000,0.9968592,3.270581e-06)
+```
+
+![](1653052478(1).jpg)
+
+![](1653052559(1).jpg)According to the tables, we can see the MSE of the
+small sample, we can get the MSE of parameters obtained by MLE is small
+than the MSE obtained by the Sample method. For the mean square error of
+large samples, the mean square error of parameters obtained by maximum
+likelihood estimation is larger than that obtained by sample method,
+which can be obtained by comparing the data in the image. By comparing
+the mean square error of MLE and sample, we can objectively see that the
+mean square error of large sample parameters is always less than that of
+small sample parameters. In other words, the ML method is more reliable
+than the sample method, and the estimation based on large samples is
+more reliable than that based on small samples, and the error with the
+real value is smaller.
+
+## 5.Conclusion
+
+After doing all the works in there, we can find that
+"residual_sugar","density" and "pH" between the **bad-wine** and
+**good-wine** just a bit different. But the features of
+"volatile_acidity" and "citric_acid" are obviously different. So
+producers can focus on decrease the **volatile_acidity**, because many
+of the compounds that cause wine faults are already naturally present in
+wine but at insufficient concentrations to adversely affect it. Also
+they can increase the **citric_acid** to improve the quality of the red
+wine.
